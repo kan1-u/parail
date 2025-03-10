@@ -85,10 +85,7 @@ where
                 }
             }
         };
-        if let Ok(pool) = rayon::ThreadPoolBuilder::new()
-            .num_threads(rayon::current_num_threads())
-            .build()
-        {
+        if let Ok(pool) = rayon::ThreadPoolBuilder::new().build() {
             pool.spawn(op);
         } else {
             std::thread::spawn(op);

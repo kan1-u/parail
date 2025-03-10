@@ -24,7 +24,7 @@ pub trait ParallelFilterMapStream<T>: Sized {
 }
 
 pub struct ParFilterMapStream<T> {
-    iter: ParMapStream<Option<T>>,
+    stream: ParMapStream<Option<T>>,
 }
 
 impl<T> futures::stream::Stream for ParFilterMapStream<T>
@@ -34,17 +34,17 @@ where
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            match this.iter.poll_next_unpin(cx) {
-                Poll::Ready(Some(item)) => {
-                    if item.is_some() {
-                        return Poll::Ready(item);
-                    }
+        match self.get_mut().stream.poll_next_unpin(cx) {
+            Poll::Ready(Some(item)) => {
+                if item.is_some() {
+                    Poll::Ready(item)
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
             }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -60,8 +60,8 @@ where
         Fut: Future<Output = Option<R>> + Send,
         R: Send + 'static,
     {
-        let iter = self.par_map_async(filter_map_op);
-        ParFilterMapStream { iter }
+        let stream = self.par_map_async(filter_map_op);
+        ParFilterMapStream { stream }
     }
 }
 
@@ -71,10 +71,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_par_filter_map_stream() {
-        let mut iter = futures::stream::iter(0..100)
+        let mut stream = futures::stream::iter(0..100)
             .par_filter_map(|i| if i % 2 == 0 { Some(i) } else { None });
         for i in (0..100).step_by(2) {
-            assert_eq!(iter.next().await, Some(i));
+            assert_eq!(stream.next().await, Some(i));
         }
     }
 }

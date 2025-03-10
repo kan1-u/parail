@@ -1,6 +1,6 @@
 [package]
 name = "parail"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Easily switch between sequential and parallel."
 authors = ["Kanichi Uegaki <kan1.921017@gmail.com>"]
