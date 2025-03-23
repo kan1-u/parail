@@ -13,6 +13,46 @@ pub struct ParMap<T> {
     next: usize,
     rx: std::sync::mpsc::Receiver<(usize, T)>,
     start: Option<oneshot::Sender<bool>>,
+    size_hint: (usize, Option<usize>),
+}
+
+impl<T> ParMap<T>
+where
+    T: Send + 'static,
+{
+    #[inline]
+    pub(crate) fn new<I, F>(iter: I, map_op: F) -> Self
+    where
+        I: Iterator + Send + 'static,
+        I::Item: Send,
+        F: Fn(I::Item) -> T + Send + Sync + 'static,
+    {
+        let size_hint = iter.size_hint();
+        let buffer = rayon::current_num_threads();
+        let (tx, rx) = std::sync::mpsc::sync_channel(buffer);
+        let (start_tx, start_rx) = oneshot::channel();
+        let done = Arc::new(atomic::AtomicBool::new(false));
+        rayon::spawn({
+            let done = done.clone();
+            move || {
+                if let Ok(true) = start_rx.recv() {
+                    let _ = iter
+                        .take_while(|_| !done.load(atomic::Ordering::Relaxed))
+                        .enumerate()
+                        .par_bridge()
+                        .try_for_each_with(tx, |tx, (i, item)| tx.send((i, map_op(item))));
+                }
+            }
+        });
+        ParMap {
+            done,
+            heap: BinaryHeap::new(),
+            next: 0,
+            rx,
+            start: Some(start_tx),
+            size_hint,
+        }
+    }
 }
 
 impl<T> Iterator for ParMap<T> {
@@ -40,6 +80,13 @@ impl<T> Iterator for ParMap<T> {
         }
         None
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (
+            self.size_hint.0.saturating_sub(self.next),
+            self.size_hint.1.map(|x| x.saturating_sub(self.next)),
+        )
+    }
 }
 
 impl<T> Drop for ParMap<T> {
@@ -52,51 +99,28 @@ impl<T> Drop for ParMap<T> {
     }
 }
 
-pub trait ParallelMap<T> {
-    fn par_map<F, R>(self, map_op: F) -> ParMap<R>
+pub trait ParallelMap {
+    type Item;
+
+    fn par_map<T, F>(self, map_op: F) -> ParMap<T>
     where
-        F: Fn(T) -> R + Send + Sync + 'static,
-        R: Send + 'static;
+        F: Fn(Self::Item) -> T + Send + Sync + 'static,
+        T: Send + 'static;
 }
 
-impl<T, I> ParallelMap<T> for I
+impl<I> ParallelMap for I
 where
-    I: Iterator<Item = T> + Send + 'static,
-    T: Send,
+    I: Iterator + Send + 'static,
+    I::Item: Send,
 {
-    fn par_map<F, R>(self, map_op: F) -> ParMap<R>
+    type Item = I::Item;
+
+    fn par_map<T, F>(self, map_op: F) -> ParMap<T>
     where
-        F: Fn(T) -> R + Send + Sync + 'static,
-        R: Send + 'static,
+        F: Fn(Self::Item) -> T + Send + Sync + 'static,
+        T: Send + 'static,
     {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let (start_tx, start_rx) = oneshot::channel();
-        let done = Arc::new(atomic::AtomicBool::new(false));
-        let op = {
-            let done = done.clone();
-            move || {
-                if let Ok(true) = start_rx.recv() {
-                    let _ = self
-                        .take_while(|_| !done.load(atomic::Ordering::Relaxed))
-                        .enumerate()
-                        .par_bridge()
-                        .map(move |(i, item)| (i, map_op(item)))
-                        .try_for_each_with(tx, |tx, item| tx.send(item));
-                }
-            }
-        };
-        if let Ok(pool) = rayon::ThreadPoolBuilder::new().build() {
-            pool.spawn(op);
-        } else {
-            std::thread::spawn(op);
-        }
-        ParMap {
-            done,
-            heap: BinaryHeap::new(),
-            next: 0,
-            rx,
-            start: Some(start_tx),
-        }
+        ParMap::new(self, map_op)
     }
 }
 

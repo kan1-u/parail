@@ -1,6 +1,6 @@
 [package]
 name = "parail"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Easily switch between sequential and parallel."
 authors = ["Kanichi Uegaki <kan1.921017@gmail.com>"]
@@ -21,11 +21,11 @@ tokio = ["dep:tokio"]
 [dependencies]
 futures = { version = "0.3.31", optional = true }
 rayon = { version = "1.10.0", optional = true }
-tokio = { version = "1.44.0", default-features = false, optional = true }
+tokio = { version = "1.44.1", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio"] }
-tokio = { version = "1.44.0", features = ["full"] }
+tokio = { version = "1.44.1", features = ["full"] }
 
 [[bench]]
 name = "bench"

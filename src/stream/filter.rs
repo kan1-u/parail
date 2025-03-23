@@ -7,14 +7,23 @@ use futures::stream::StreamExt;
 
 use super::*;
 
-pub trait ParallelFilterStream<T> {
-    fn par_filter<F>(self, filter_op: F) -> ParFilterStream<T>
-    where
-        F: FnOnce(&T) -> bool + Clone + Send + 'static;
-}
-
 pub struct ParFilterStream<T> {
     stream: ParMapStream<Option<T>>,
+}
+
+impl<T> ParFilterStream<T>
+where
+    T: Send + 'static,
+{
+    #[inline]
+    pub(crate) fn new<S, F>(stream: S, filter_op: F) -> Self
+    where
+        S: futures::stream::Stream<Item = T> + Send + 'static,
+        F: FnOnce(&S::Item) -> bool + Clone + Send + 'static,
+    {
+        let stream = ParMapStream::new(stream, move |item| filter_op(&item).then(|| item));
+        ParFilterStream { stream }
+    }
 }
 
 impl<T> futures::stream::Stream for ParFilterStream<T>
@@ -37,19 +46,32 @@ where
             Poll::Pending => Poll::Pending,
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.stream.size_hint().1)
+    }
 }
 
-impl<S, T> ParallelFilterStream<T> for S
-where
-    S: futures::stream::Stream<Item = T> + Send + 'static,
-    T: Send + 'static,
-{
-    fn par_filter<F>(self, filter_op: F) -> ParFilterStream<T>
+pub trait ParallelFilterStream {
+    type Item;
+
+    fn par_filter<F>(self, filter_op: F) -> ParFilterStream<Self::Item>
     where
-        F: FnOnce(&T) -> bool + Clone + Send + 'static,
+        F: FnOnce(&Self::Item) -> bool + Clone + Send + 'static;
+}
+
+impl<S> ParallelFilterStream for S
+where
+    S: futures::stream::Stream + Send + 'static,
+    S::Item: Send,
+{
+    type Item = S::Item;
+
+    fn par_filter<F>(self, filter_op: F) -> ParFilterStream<Self::Item>
+    where
+        F: FnOnce(&Self::Item) -> bool + Clone + Send + 'static,
     {
-        let stream = self.par_map(move |item| filter_op(&item).then(|| item));
-        ParFilterStream { stream }
+        ParFilterStream::new(self, filter_op)
     }
 }
 

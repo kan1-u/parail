@@ -4,31 +4,53 @@ pub struct ParFilter<T> {
     iter: ParMap<Option<T>>,
 }
 
+impl<T> ParFilter<T>
+where
+    T: Send + 'static,
+{
+    #[inline]
+    pub(crate) fn new<I, F>(iter: I, filter_op: F) -> Self
+    where
+        I: Iterator<Item = T> + Send + 'static,
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+    {
+        let iter = ParMap::new(iter, move |item| filter_op(&item).then(|| item));
+        ParFilter { iter }
+    }
+}
+
 impl<T> Iterator for ParFilter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.find_map(|item| item)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.iter.size_hint().1)
+    }
 }
 
-pub trait ParallelFilter<T> {
-    fn par_filter<F>(self, filter_op: F) -> ParFilter<T>
+pub trait ParallelFilter {
+    type Item;
+
+    fn par_filter<F>(self, filter_op: F) -> ParFilter<Self::Item>
     where
-        F: Fn(&T) -> bool + Send + Sync + 'static;
+        F: Fn(&Self::Item) -> bool + Send + Sync + 'static;
 }
 
-impl<T, I> ParallelFilter<T> for I
+impl<I> ParallelFilter for I
 where
-    I: Iterator<Item = T> + Send + 'static,
-    T: Send + 'static,
+    I: Iterator + Send + 'static,
+    I::Item: Send,
 {
-    fn par_filter<F>(self, filter_op: F) -> ParFilter<T>
+    type Item = I::Item;
+
+    fn par_filter<F>(self, filter_op: F) -> ParFilter<Self::Item>
     where
-        F: Fn(&T) -> bool + Send + Sync + 'static,
+        F: Fn(&Self::Item) -> bool + Send + Sync + 'static,
     {
-        let iter = self.par_map(move |item| filter_op(&item).then(|| item));
-        ParFilter { iter }
+        ParFilter::new(self, filter_op)
     }
 }
 
