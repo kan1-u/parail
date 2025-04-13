@@ -7,41 +7,34 @@ use futures::stream::StreamExt;
 
 use super::*;
 
-pub struct ParFilterMapStream<T> {
-    stream: ParMapStream<Option<T>>,
+pub struct ParFilterMapStream<T, S, F> {
+    stream: ParMapStream<Option<T>, S, F>,
 }
 
-impl<T> ParFilterMapStream<T>
+impl<T, S, F, Fut> ParFilterMapStream<T, S, F>
 where
     T: Send + 'static,
+    S: futures::stream::Stream + Send + 'static,
+    S::Item: Send,
+    F: FnOnce(S::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Option<T>> + Send,
 {
     #[inline]
-    pub(crate) fn new<S, F>(stream: S, filter_map_op: F) -> Self
-    where
-        S: futures::stream::Stream + Send + 'static,
-        S::Item: Send,
-        F: FnOnce(S::Item) -> Option<T> + Clone + Send + 'static,
-    {
+    pub(crate) fn new(stream: S, filter_map_op: F) -> Self {
         let stream = ParMapStream::new(stream, filter_map_op);
         ParFilterMapStream { stream }
     }
-
-    #[inline]
-    pub(crate) fn with_async_fn<S, F, Fut>(stream: S, filter_map_op: F) -> Self
-    where
-        S: futures::stream::Stream + Send + 'static,
-        S::Item: Send,
-        F: FnOnce(S::Item) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = Option<T>> + Send,
-    {
-        let stream = ParMapStream::with_async_fn(stream, filter_map_op);
-        ParFilterMapStream { stream }
-    }
 }
 
-impl<T> futures::stream::Stream for ParFilterMapStream<T>
+impl<T, S, F, Fut> futures::stream::Stream for ParFilterMapStream<T, S, F>
 where
-    T: Unpin,
+    Self: Unpin,
+    ParMapStream<Option<T>, S, F>: Unpin,
+    T: Send + 'static,
+    S: futures::stream::Stream + Send + 'static,
+    S::Item: Send,
+    F: FnOnce(S::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Option<T>> + Send,
 {
     type Item = T;
 
@@ -65,43 +58,45 @@ where
     }
 }
 
-pub trait ParallelFilterMapStream {
-    type Item;
-
-    fn par_filter_map<T, F>(self, filter_map_op: F) -> ParFilterMapStream<T>
+pub trait ParallelFilterMapStream: futures::stream::Stream {
+    fn par_filter_map<T, F>(self, filter_map_op: F) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> Option<T> + Clone + Send + 'static,
-        T: Send + 'static;
+        F: Unpin + FnOnce(Self::Item) -> Option<T> + Clone + Send + 'static,
+        T: Unpin + Send + 'static;
 
-    fn par_filter_map_async<T, Fut, F>(self, filter_map_op: F) -> ParFilterMapStream<T>
+    fn par_filter_map_async<T, Fut, F>(
+        self,
+        filter_map_op: F,
+    ) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
+        F: Unpin + FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = Option<T>> + Send,
-        T: Send + 'static;
+        T: Unpin + Send + 'static;
 }
 
 impl<S> ParallelFilterMapStream for S
 where
-    S: futures::stream::Stream + Send + 'static,
+    S: Unpin + futures::stream::Stream + Send + 'static,
     S::Item: Send,
 {
-    type Item = S::Item;
-
-    fn par_filter_map<T, F>(self, filter_map_op: F) -> ParFilterMapStream<T>
+    fn par_filter_map<T, F>(self, filter_map_op: F) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> Option<T> + Clone + Send + 'static,
-        T: Send + 'static,
+        F: Unpin + FnOnce(Self::Item) -> Option<T> + Clone + Send + 'static,
+        T: Unpin + Send + 'static,
     {
-        ParFilterMapStream::new(self, filter_map_op)
+        ParFilterMapStream::new(self, async move |item| filter_map_op(item))
     }
 
-    fn par_filter_map_async<T, Fut, F>(self, filter_map_op: F) -> ParFilterMapStream<T>
+    fn par_filter_map_async<T, Fut, F>(
+        self,
+        filter_map_op: F,
+    ) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
+        F: Unpin + FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = Option<T>> + Send,
-        T: Send + 'static,
+        T: Unpin + Send + 'static,
     {
-        ParFilterMapStream::with_async_fn(self, filter_map_op)
+        ParFilterMapStream::new(self, filter_map_op)
     }
 }
 

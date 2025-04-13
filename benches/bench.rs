@@ -15,7 +15,7 @@ fn bench_fibonacci(c: &mut Criterion) {
     for fib_n in [10, 20, 30] {
         let mut group = c.benchmark_group(format!("fibonacci/{}", fib_n));
 
-        for num_elements in [1, 10, 100, 1_000, 100_000] {
+        for num_elements in [1, 10, 100, 1_000, 10_000] {
             let elements = (0..num_elements).collect::<Vec<u64>>();
 
             group.bench_with_input(

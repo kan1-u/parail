@@ -99,5 +99,6 @@ More features will be added as needed.
   - [x] par_map
   - [x] par_map_async
   - [x] par_filter
+  - [x] par_filter_async
   - [x] par_filter_map
   - [x] par_filter_map_async

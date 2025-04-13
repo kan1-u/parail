@@ -1,26 +1,30 @@
 use super::*;
 
-pub struct ParFilterMap<T> {
-    iter: ParMap<Option<T>>,
+pub struct ParFilterMap<T, I, F> {
+    iter: ParMap<Option<T>, I, F>,
 }
 
-impl<T> ParFilterMap<T>
+impl<T, I, F> ParFilterMap<T, I, F>
 where
     T: Send + 'static,
+    I: Iterator + Send + 'static,
+    I::Item: Send,
+    F: Fn(I::Item) -> Option<T> + Send + Sync + 'static,
 {
     #[inline]
-    pub(crate) fn new<I, F>(iter: I, filter_map_op: F) -> Self
-    where
-        I: Iterator + Send + 'static,
-        I::Item: Send,
-        F: Fn(I::Item) -> Option<T> + Send + Sync + 'static,
-    {
+    pub(crate) fn new(iter: I, filter_map_op: F) -> Self {
         let iter = ParMap::new(iter, filter_map_op);
         ParFilterMap { iter }
     }
 }
 
-impl<T> Iterator for ParFilterMap<T> {
+impl<T, I, F> Iterator for ParFilterMap<T, I, F>
+where
+    T: Send + 'static,
+    I: Iterator + Send + 'static,
+    I::Item: Send,
+    F: Fn(I::Item) -> Option<T> + Send + Sync + 'static,
+{
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -32,10 +36,8 @@ impl<T> Iterator for ParFilterMap<T> {
     }
 }
 
-pub trait ParallelFilterMap {
-    type Item;
-
-    fn par_filter_map<T, F>(self, filter_map_op: F) -> ParFilterMap<T>
+pub trait ParallelFilterMap: Iterator {
+    fn par_filter_map<T, F>(self, filter_map_op: F) -> impl Iterator<Item = T>
     where
         F: Fn(Self::Item) -> Option<T> + Send + Sync + 'static,
         T: Send + 'static;
@@ -46,9 +48,7 @@ where
     I: Iterator + Send + 'static,
     I::Item: Send,
 {
-    type Item = I::Item;
-
-    fn par_filter_map<T, F>(self, filter_map_op: F) -> ParFilterMap<T>
+    fn par_filter_map<T, F>(self, filter_map_op: F) -> impl Iterator<Item = T>
     where
         F: Fn(Self::Item) -> Option<T> + Send + Sync + 'static,
         T: Send + 'static,

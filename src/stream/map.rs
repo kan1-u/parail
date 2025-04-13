@@ -9,47 +9,48 @@ use futures::stream::StreamExt;
 
 use crate::utils::heap::HeapItem;
 
-pub struct ParMapStream<T> {
+pub struct ParMapStream<T, S, F> {
+    stream: Option<S>,
+    map_op: Option<F>,
+    rx: Option<tokio::sync::mpsc::Receiver<(usize, T)>>,
     done: Arc<atomic::AtomicBool>,
     heap: BinaryHeap<HeapItem<T>>,
     next: usize,
-    rx: tokio::sync::mpsc::Receiver<(usize, T)>,
-    start: Option<tokio::sync::oneshot::Sender<bool>>,
-    size_hint: (usize, Option<usize>),
 }
 
-impl<T> ParMapStream<T>
+impl<T, S, F, Fut> ParMapStream<T, S, F>
 where
     T: Send + 'static,
+    S: futures::stream::Stream + Send + 'static,
+    S::Item: Send,
+    F: FnOnce(S::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = T> + Send,
 {
     #[inline]
-    pub(crate) fn new<S, F>(stream: S, map_op: F) -> Self
-    where
-        S: futures::stream::Stream + Send + 'static,
-        S::Item: Send,
-        F: FnOnce(S::Item) -> T + Clone + Send + 'static,
-    {
-        ParMapStream::with_async_fn(stream, move |item| futures::future::ready(map_op(item)))
+    pub(crate) fn new(stream: S, map_op: F) -> Self {
+        ParMapStream {
+            stream: Some(stream),
+            map_op: Some(map_op),
+            rx: None,
+            done: Arc::new(atomic::AtomicBool::new(false)),
+            heap: BinaryHeap::new(),
+            next: 0,
+        }
     }
 
     #[inline]
-    pub(crate) fn with_async_fn<S, F, Fut>(stream: S, map_op: F) -> Self
-    where
-        S: futures::stream::Stream + Send + 'static,
-        S::Item: Send,
-        F: FnOnce(S::Item) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = T> + Send,
-    {
-        let size_hint = stream.size_hint();
-        let handle = tokio::runtime::Handle::current();
-        let buffer = handle.metrics().num_workers();
-        let (tx, rx) = tokio::sync::mpsc::channel(buffer);
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-        let done = Arc::new(atomic::AtomicBool::new(false));
-        handle.spawn({
-            let done = done.clone();
-            async move {
-                if let Ok(true) = start_rx.await {
+    fn start(&mut self) {
+        if self.stream.is_none() || self.map_op.is_none() {
+            return;
+        }
+        if let Some(stream) = self.stream.take() {
+            if let Some(map_op) = self.map_op.take() {
+                let handle = tokio::runtime::Handle::current();
+                let buffer = handle.metrics().num_workers();
+                let (tx, rx) = tokio::sync::mpsc::channel(buffer);
+                self.rx = Some(rx);
+                let done = self.done.clone();
+                handle.spawn(async move {
                     let mut this = Box::pin(stream);
                     let mut sets = tokio::task::JoinSet::new();
                     let mut next = 0;
@@ -80,110 +81,98 @@ where
                         next += 1;
                     }
                     while let Some(_) = sets.join_next().await {}
-                }
+                });
             }
-        });
-        ParMapStream {
-            done,
-            heap: BinaryHeap::new(),
-            next: 0,
-            rx,
-            start: Some(start_tx),
-            size_hint,
         }
     }
 }
 
-impl<T> futures::stream::Stream for ParMapStream<T>
+impl<T, S, F, Fut> futures::stream::Stream for ParMapStream<T, S, F>
 where
-    T: Unpin,
+    Self: Unpin,
+    T: Send + 'static,
+    S: futures::stream::Stream + Send + 'static,
+    S::Item: Send,
+    F: FnOnce(S::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = T> + Send,
 {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if let Some(tx) = this.start.take() {
-            if tx.send(true).is_err() {
-                return Poll::Ready(None);
-            }
-        }
+        this.start();
         if let Some(HeapItem(i, _)) = this.heap.peek() {
             if *i == this.next {
                 this.next += 1;
                 return Poll::Ready(this.heap.pop().map(|HeapItem(_, item)| item));
             }
         }
-        match this.rx.poll_recv(cx) {
-            Poll::Ready(Some((i, item))) => {
-                if i == this.next {
+        if let Some(rx) = this.rx.as_mut() {
+            return match rx.poll_recv(cx) {
+                Poll::Ready(Some((i, item))) if i == this.next => {
                     this.next += 1;
                     Poll::Ready(Some(item))
-                } else {
+                }
+                Poll::Ready(Some((i, item))) => {
                     this.heap.push(HeapItem(i, item));
                     cx.waker().wake_by_ref();
                     Poll::Pending
                 }
-            }
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            };
         }
+        Poll::Pending
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (
-            self.size_hint.0.saturating_sub(self.next),
-            self.size_hint.1.map(|x| x.saturating_sub(self.next)),
-        )
-    }
-}
-
-impl<T> Drop for ParMapStream<T> {
-    fn drop(&mut self) {
-        if let Some(tx) = self.start.take() {
-            let _ = tx.send(false);
+        if let Some(stream) = self.stream.as_ref() {
+            stream.size_hint()
         } else {
-            self.done.store(true, atomic::Ordering::Relaxed);
+            (0, None)
         }
     }
 }
 
-pub trait ParallelMapStream {
-    type Item;
+impl<T, S, F> Drop for ParMapStream<T, S, F> {
+    fn drop(&mut self) {
+        self.done.store(true, atomic::Ordering::Relaxed);
+    }
+}
 
-    fn par_map<T, F>(self, map_op: F) -> ParMapStream<T>
+pub trait ParallelMapStream: futures::stream::Stream + Sized {
+    fn par_map<T, F>(self, map_op: F) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> T + Clone + Send + 'static,
-        T: Send + 'static;
+        F: Unpin + FnOnce(Self::Item) -> T + Clone + Send + 'static,
+        T: Unpin + Send + 'static;
 
-    fn par_map_async<T, Fut, F>(self, map_op: F) -> ParMapStream<T>
+    fn par_map_async<T, Fut, F>(self, map_op: F) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
+        F: Unpin + FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = T> + Send,
-        T: Send + 'static;
+        T: Unpin + Send + 'static;
 }
 
 impl<S> ParallelMapStream for S
 where
-    S: futures::stream::Stream + Send + 'static,
+    S: Unpin + futures::stream::Stream + Send + 'static,
     S::Item: Send,
 {
-    type Item = S::Item;
-
-    fn par_map<T, F>(self, map_op: F) -> ParMapStream<T>
+    fn par_map<T, F>(self, map_op: F) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> T + Clone + Send + 'static,
-        T: Send + 'static,
+        F: Unpin + FnOnce(Self::Item) -> T + Clone + Send + 'static,
+        T: Unpin + Send + 'static,
     {
-        ParMapStream::new(self, map_op)
+        ParMapStream::new(self, async |item| map_op(item))
     }
 
-    fn par_map_async<T, Fut, F>(self, map_op: F) -> ParMapStream<T>
+    fn par_map_async<T, Fut, F>(self, map_op: F) -> impl futures::stream::Stream<Item = T>
     where
-        F: FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
+        F: Unpin + FnOnce(Self::Item) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = T> + Send,
-        T: Send + 'static,
+        T: Unpin + Send + 'static,
     {
-        ParMapStream::with_async_fn(self, map_op)
+        ParMapStream::new(self, map_op)
     }
 }
 
